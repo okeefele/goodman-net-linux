@@ -9,6 +9,7 @@ import json, os, sys, threading, subprocess, urllib.request, platform
 import gmcore
 
 IS_WIN = platform.system() == 'Windows'
+IS_MAC = platform.system() == 'Darwin'
 # ресурсы (ui.html, logo, sing-box, wintun): рядом со скриптом, а в PyInstaller-сборке — в _MEIPASS
 if getattr(sys, 'frozen', False):
     RES_DIR = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
@@ -17,10 +18,22 @@ else:
     RES_DIR = APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_HOME = os.path.join(os.path.expanduser('~'), '.config', 'goodman-net')
 SETTINGS = os.path.join(CFG_HOME, 'settings.json')
-SYS_CONFIG = (os.path.join(os.environ.get('PROGRAMDATA', 'C:/ProgramData'), 'GoodManNet', 'config.json')
-              if IS_WIN else '/etc/goodman-net/config.json')
+# macOS: sing-box работает от root (utun), конфиг/лог/pid — в ~/.goodmannet (путь без пробелов,
+# читается и root, и пользователем). Управление туннелем — через osascript (admin-права).
+MAC_DIR = os.path.join(os.path.expanduser('~'), '.goodmannet')
+if IS_WIN:
+    SYS_CONFIG = os.path.join(os.environ.get('PROGRAMDATA', 'C:/ProgramData'), 'GoodManNet', 'config.json')
+elif IS_MAC:
+    SYS_CONFIG = os.path.join(MAC_DIR, 'config.json')
+else:
+    SYS_CONFIG = '/etc/goodman-net/config.json'
 SING_BOX = (os.path.join(RES_DIR, 'sing-box.exe') if IS_WIN else os.path.join(RES_DIR, 'sing-box'))
+MAC_LOG = os.path.join(MAC_DIR, 'singbox.log')
+MAC_PID = os.path.join(MAC_DIR, 'singbox.pid')
+MAC_RUN = os.path.join(MAC_DIR, 'run.sh')
 KILL_ENV = '/etc/goodman-net/killswitch.env'
+if IS_MAC:
+    os.makedirs(MAC_DIR, exist_ok=True)
 
 os.makedirs(CFG_HOME, exist_ok=True)
 
@@ -44,6 +57,15 @@ if IS_WIN:
         _lf = _io.StringIO()          # крайний случай — лишь бы не None
     sys.stdout = _lf
     sys.stderr = _lf
+elif IS_MAC and getattr(sys, 'frozen', False):
+    # .app из Finder — нет консоли; пишем в ~/Library/Logs/GoodManNet/app.log для отладки
+    try:
+        _ld = os.path.join(os.path.expanduser('~'), 'Library', 'Logs', 'GoodManNet')
+        os.makedirs(_ld, exist_ok=True)
+        _lf = open(os.path.join(_ld, 'app.log'), 'a', encoding='utf-8', errors='replace', buffering=1)
+        sys.stdout = sys.stderr = _lf
+    except Exception:
+        pass
 
 import uuid as _uuid
 
@@ -164,7 +186,7 @@ def get_hwid():
 
 def sub_fetch(url):
     """Загрузка подписки с hwid. Возвращает (servers, error, meta)."""
-    osn = 'windows' if IS_WIN else 'linux'
+    osn = 'windows' if IS_WIN else ('macos' if IS_MAC else 'linux')
     try:
         model = platform.node()[:40]
     except Exception:
@@ -256,6 +278,50 @@ def _win_stop():
     return _R(0)
 
 
+# ---- macOS: sing-box от root (utun) через osascript (запрос admin-пароля) ----
+def _mac_alive():
+    r = subprocess.run(['pgrep', '-f', 'sing-box run'], capture_output=True, text=True)
+    return bool(r.stdout.strip())
+
+
+def _osascript_admin(shell_cmd):
+    """Выполнить shell-команду с правами администратора (один запрос пароля macOS)."""
+    script = 'do shell script %s with administrator privileges' % json.dumps(shell_cmd)
+    return subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=120)
+
+
+def _mac_start():
+    if _mac_alive():
+        return _R(0)
+    # run.sh: глушим старый sing-box, стартуем новый в фоне от root, пишем PID
+    run = ('#!/bin/sh\n'
+           '/usr/bin/pkill -f "sing-box run" 2>/dev/null\n'
+           'sleep 0.3\n'
+           'nohup "%s" run -c "%s" >"%s" 2>&1 &\n'
+           'echo $! > "%s"\n' % (SING_BOX, SYS_CONFIG, MAC_LOG, MAC_PID))
+    try:
+        with open(MAC_RUN, 'w') as f:
+            f.write(run)
+        os.chmod(MAC_RUN, 0o755)
+    except Exception as e:
+        return _R(1, str(e))
+    r = _osascript_admin('/bin/sh "%s"' % MAC_RUN)
+    if r.returncode != 0:
+        return _R(1, (r.stderr or 'не удалось получить права администратора').strip())
+    import time
+    time.sleep(1.0)
+    if not _mac_alive():
+        return _R(1, 'sing-box завершился сразу — см. лог')
+    return _R(0)
+
+
+def _mac_stop():
+    if not _mac_alive():
+        return _R(0)
+    r = _osascript_admin('/usr/bin/pkill -f "sing-box run"')
+    return _R(0) if r.returncode == 0 else _R(1, (r.stderr or '').strip())
+
+
 def svc(action, unit='goodman-net.service'):
     if IS_WIN:
         if action == 'stop':
@@ -263,11 +329,17 @@ def svc(action, unit='goodman-net.service'):
         if action == 'restart':
             _win_stop()
         return _win_start()
+    if IS_MAC:
+        if action == 'stop':
+            return _mac_stop()
+        if action == 'restart':
+            _mac_stop()
+        return _mac_start()
     return subprocess.run(['systemctl', action, unit], capture_output=True, text=True)
 
 
 def kill_unit_exists():
-    if IS_WIN:
+    if IS_WIN or IS_MAC:
         return False
     r = subprocess.run(['systemctl', 'cat', 'goodman-net-kill.service'], capture_output=True, text=True)
     return r.returncode == 0
@@ -277,6 +349,8 @@ def killswitch(on, server_ip=''):
     """Вкл/выкл kill switch (отдельный root-юнит с nftables). (ok, details)."""
     if IS_WIN:
         return False, 'Windows: пока недоступно'
+    if IS_MAC:
+        return False, 'macOS: пока недоступно'
     if on:
         try:
             with open(KILL_ENV, 'w', encoding='utf-8') as f:
@@ -293,8 +367,8 @@ def killswitch(on, server_ip=''):
 
 def svc_logs(lines=250):
     try:
-        if IS_WIN:
-            logf = os.path.join(os.path.dirname(SYS_CONFIG), 'singbox.log')
+        if IS_WIN or IS_MAC:
+            logf = os.path.join(os.path.dirname(SYS_CONFIG), 'singbox.log') if IS_WIN else MAC_LOG
             if os.path.exists(logf):
                 with open(logf, encoding='utf-8', errors='replace') as f:
                     return ''.join(f.readlines()[-lines:]) or '(лог пуст)'
@@ -326,6 +400,8 @@ def is_connected():
         r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq sing-box.exe'],
                            capture_output=True, text=True, creationflags=0x08000000)
         return 'sing-box.exe' in (r.stdout or '')
+    if IS_MAC:
+        return _mac_alive()
     r = subprocess.run(['systemctl', 'is-active', 'goodman-net.service'],
                        capture_output=True, text=True)
     return r.stdout.strip() == 'active'
@@ -341,6 +417,12 @@ def write_sys_config(server):
         cfg['log']['output'] = WIN_LOG   # служба Windows не отдаёт stdout → пишем лог в файл
         tun = cfg['inbounds'][0]          # iproute2_* — только Linux; на Windows убираем
         tun.pop('iproute2_table_index', None); tun.pop('iproute2_rule_index', None)
+    elif IS_MAC:
+        tun = cfg['inbounds'][0]          # iproute2_* — только Linux; на macOS utun убираем их
+        tun.pop('iproute2_table_index', None); tun.pop('iproute2_rule_index', None)
+        tun.pop('interface_name', None)   # macOS требует utunN → пусть sing-box выберет сам
+        # sing-box от root пишет лог в файл (stdout уходит в никуда при запуске через osascript)
+        cfg.setdefault('log', {})['output'] = MAC_LOG
     os.makedirs(os.path.dirname(SYS_CONFIG), exist_ok=True)
     json.dump(cfg, open(SYS_CONFIG, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
     return cfg
@@ -1762,7 +1844,7 @@ def run_tk():
     root.mainloop()
 
 def main():
-    if IS_WIN:
+    if IS_WIN or IS_MAC:
         try:
             run_tk(); return
         except Exception as e:
