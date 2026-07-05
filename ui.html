@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoodMan Net</title>
+<style>
+  :root { --bg:#05122B; --card:#0b1e3f; --accent:#2b7bff; --green:#22c55e; --red:#ef4444; --muted:#8aa0c6; }
+  * { box-sizing:border-box; -webkit-user-select:none; user-select:none; }
+  html,body { margin:0; height:100%; background:radial-gradient(circle at 50% 20%, #0d2450, #05122B 70%); color:#eaf1ff;
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:420px; margin:0 auto; min-height:100%; display:flex; flex-direction:column; align-items:center; padding:26px 20px 30px; position:relative; }
+  .topbar { position:absolute; top:14px; right:14px; display:flex; gap:8px; }
+  .icon-btn { width:38px; height:38px; border-radius:11px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.05);
+    color:#c7d6f5; font-size:17px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .icon-btn:hover { background:rgba(255,255,255,.1); }
+  .logo { width:74px; height:74px; border-radius:20px; margin-top:6px; }
+  h1 { font-size:19px; font-weight:700; margin:10px 0 2px; letter-spacing:.3px; }
+  .power { margin:34px 0 18px; width:190px; height:190px; border-radius:50%; border:none; cursor:pointer;
+    background:radial-gradient(circle at 50% 40%, #33405e, #1a2440); color:#dbe6ff; position:relative;
+    box-shadow:0 0 0 8px rgba(255,255,255,.03), 0 14px 40px rgba(0,0,0,.5); transition:all .25s; }
+  .power svg { width:70px; height:70px; }
+  .power.on { background:radial-gradient(circle at 50% 40%, #34d977, #16a34a); color:#fff;
+    box-shadow:0 0 0 8px rgba(34,197,94,.15), 0 0 60px rgba(34,197,94,.45); }
+  .power.busy { opacity:.7; }
+  .power:active { transform:scale(.97); }
+  .status { font-size:16px; font-weight:600; min-height:24px; text-align:center; }
+  .status.on { color:var(--green); } .status.off { color:var(--muted); }
+  .sub-hint { color:var(--muted); font-size:13px; text-align:center; margin-top:4px; }
+  .servers { width:100%; margin-top:26px; background:var(--card); border-radius:16px; overflow:hidden; }
+  .srv { padding:15px 18px; border-bottom:1px solid rgba(255,255,255,.06); font-size:15px; cursor:pointer;
+    display:flex; justify-content:space-between; align-items:center; }
+  .srv:last-child { border-bottom:none; }
+  .srv.sel { background:rgba(43,123,255,.14); }
+  .srv .dot { width:10px; height:10px; border-radius:50%; background:transparent; border:2px solid #45608f; }
+  .srv.sel .dot { background:var(--accent); border-color:var(--accent); }
+  .setup { width:100%; margin-top:20px; }
+  .setup input { width:100%; padding:13px 14px; border-radius:12px; border:1px solid #22406f;
+    background:#0a1830; color:#eaf1ff; font-size:14px; -webkit-user-select:text; user-select:text; }
+  .btn { width:100%; margin-top:10px; padding:13px; border-radius:12px; border:none; background:var(--accent);
+    color:#fff; font-size:15px; font-weight:600; cursor:pointer; }
+  .btn:active { opacity:.85; }
+  .link { color:var(--muted); font-size:12px; margin-top:16px; text-decoration:none; }
+  .hidden { display:none; }
+
+  /* панель ошибки — текст можно выделять и копировать */
+  .errbox { width:100%; margin-top:16px; background:rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.4);
+    border-radius:14px; padding:14px; }
+  .errbox .et { color:#fda4a4; font-weight:700; font-size:14px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; }
+  .errbox .ex { background:transparent; border:none; color:#fca5a5; cursor:pointer; font-size:15px; }
+  .errbox pre { margin:0; white-space:pre-wrap; word-break:break-word; font-family:monospace; font-size:11.5px;
+    color:#fecaca; max-height:180px; overflow:auto; -webkit-user-select:text; user-select:text; }
+  .errbox .row { display:flex; gap:8px; margin-top:10px; }
+  .mini { flex:1; padding:9px; border-radius:10px; border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.06); color:#e5edff; font-size:12.5px; font-weight:600; cursor:pointer; }
+
+  /* модалка логов */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:50; }
+  .mcard { width:92%; max-width:640px; height:78%; background:#0a1830; border:1px solid #22406f; border-radius:16px;
+    display:flex; flex-direction:column; padding:14px; }
+  .mhead { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .mhead b { font-size:15px; }
+  .mcard textarea { flex:1; width:100%; resize:none; background:#050e20; color:#c9d8f3; border:1px solid #1b3155;
+    border-radius:10px; padding:10px; font-family:monospace; font-size:11px; -webkit-user-select:text; user-select:text; }
+  .mrow { display:flex; gap:8px; margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <button class="icon-btn" onclick="showLogs()" title="Логи">📋</button>
+  </div>
+
+  <img class="logo" src="/logo.png" alt="">
+  <h1>GoodMan Net</h1>
+
+  <button id="power" class="power" onclick="toggle()" title="Подключить">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <path d="M12 3v9"></path><path d="M6.6 6.6a8 8 0 1 0 10.8 0"></path>
+    </svg>
+  </button>
+  <div id="status" class="status off">Отключено</div>
+  <div id="hint" class="sub-hint"></div>
+
+  <div id="errbox" class="errbox hidden">
+    <div class="et"><span id="errtitle">Ошибка</span><button class="ex" onclick="hideErr()">✕</button></div>
+    <pre id="errdetails"></pre>
+    <div class="row">
+      <button class="mini" onclick="copyErr()">📋 Скопировать</button>
+      <button class="mini" onclick="showLogs()">Логи сервиса</button>
+    </div>
+  </div>
+
+  <div id="setup" class="setup hidden">
+    <input id="suburl" placeholder="Вставьте ссылку на подписку (gdman.ink/s/...)">
+    <button class="btn" onclick="saveSub()">Подключить подписку</button>
+  </div>
+
+  <div id="servers" class="servers hidden"></div>
+  <a class="link" href="https://gdman.ink" target="_blank">gdman.ink · личный кабинет</a>
+</div>
+
+<div id="logmodal" class="modal hidden">
+  <div class="mcard">
+    <div class="mhead"><b>📋 Логи VPN-сервиса</b><button class="ex icon-btn" style="width:32px;height:32px" onclick="hideLogs()">✕</button></div>
+    <textarea id="logtext" readonly spellcheck="false"></textarea>
+    <div class="mrow">
+      <button class="mini" onclick="loadLogs()">🔄 Обновить</button>
+      <button class="mini" onclick="copyLogs()">📋 Скопировать всё</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let S = { connected:false, sub_set:false, servers:[], selected:0, busy:false };
+
+async function api(path, body){
+  const o = { method: body?'POST':'GET' };
+  if (body){ o.headers={'Content-Type':'application/json'}; o.body=JSON.stringify(body); }
+  return (await fetch(path, o)).json();
+}
+
+function showErr(title, details){
+  document.getElementById('errtitle').textContent = title || 'Ошибка';
+  document.getElementById('errdetails').textContent = details || '';
+  document.getElementById('errbox').classList.remove('hidden');
+}
+function hideErr(){ document.getElementById('errbox').classList.add('hidden'); }
+function copyText(t){
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+  const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
+  ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+}
+function copyErr(){
+  copyText(document.getElementById('errtitle').textContent + '\n' + document.getElementById('errdetails').textContent);
+}
+
+async function showLogs(){ document.getElementById('logmodal').classList.remove('hidden'); await loadLogs(); }
+function hideLogs(){ document.getElementById('logmodal').classList.add('hidden'); }
+async function loadLogs(){
+  document.getElementById('logtext').value = 'Загрузка…';
+  try { const d = await api('/api/logs'); document.getElementById('logtext').value = d.logs || '(пусто)'; }
+  catch(e){ document.getElementById('logtext').value = 'Не удалось получить логи: ' + e; }
+}
+function copyLogs(){ copyText(document.getElementById('logtext').value); }
+
+async function refresh(){
+  const st = await api('/api/state');
+  S.connected = st.connected; S.sub_set = st.sub_set;
+  S.servers = st.servers||[]; S.selected = st.selected||0;
+  render(st);
+}
+
+function render(st){
+  const pw = document.getElementById('power');
+  const status = document.getElementById('status');
+  pw.className = 'power' + (S.connected?' on':'') + (S.busy?' busy':'');
+  if (S.busy){ status.textContent = S.connected?'Отключение…':'Подключение…'; status.className='status'; }
+  else if (S.connected){
+    status.textContent = (st.flag||'✅') + ' Подключено' + (st.exit_ip ? ' · ' + st.exit_ip : '');
+    status.className='status on';
+  } else { status.textContent='Отключено'; status.className='status off'; }
+
+  document.getElementById('setup').classList.toggle('hidden', S.sub_set);
+  document.getElementById('hint').textContent = S.sub_set ? '' : 'Добавьте подписку, чтобы начать';
+
+  const box = document.getElementById('servers');
+  box.classList.toggle('hidden', !S.sub_set);
+  box.innerHTML = S.servers.map((n,i)=>
+    `<div class="srv ${i===S.selected?'sel':''}" onclick="pick(${i})"><span>${n}</span><span class="dot"></span></div>`).join('');
+}
+
+async function toggle(){
+  if (S.busy) return;
+  if (!S.sub_set){ document.getElementById('suburl').focus(); return; }
+  S.busy = true; hideErr(); render({});
+  try {
+    const r = await api(S.connected?'/api/disconnect':'/api/connect', {});
+    if (r.error){ showErr(r.error, r.details||''); }
+  } catch(e){ showErr('Ошибка приложения', String(e)); }
+  setTimeout(async()=>{ S.busy=false; await refresh(); }, 1200);
+}
+
+async function pick(i){
+  S.selected=i; render({});
+  await api('/api/select', {index:i});
+  if (S.connected){ S.busy=true; render({}); setTimeout(async()=>{S.busy=false; await refresh();},1500); }
+}
+
+async function saveSub(){
+  const url = document.getElementById('suburl').value.trim();
+  if (!url) return;
+  hideErr();
+  try {
+    const r = await api('/api/sub', {url});
+    if (r.error){ showErr(r.error, r.details||''); return; }
+  } catch(e){ showErr('Ошибка приложения', String(e)); return; }
+  await refresh();
+}
+
+refresh();
+setInterval(()=>{ if(!S.busy && document.getElementById('logmodal').classList.contains('hidden')) refresh(); }, 4000);
+</script>
+</body>
+</html>
