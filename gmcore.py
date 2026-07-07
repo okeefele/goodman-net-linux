@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """GoodMan Net — ядро десктоп-клиента: разбор подписки + генерация sing-box конфига.
 Схема конфига под sing-box >= 1.12 (новый формат dns.servers, без detour на пустой direct)."""
-import base64, json, socket, urllib.parse, urllib.request
+import base64, json, socket, urllib.parse, urllib.request, re
 
 # отдельная таблица/правила маршрутизации — чтобы не конфликтовать с другими VPN (Happ и т.п.)
 ROUTE_TABLE = 2233
 ROUTE_RULE = 8300
+
+
+def general_servers(servers):
+    """Серверы «общего доступа» (основной GoodMan Net + резерв) — для авто-переключения.
+    Страны, Plus/RU-зеркало, YouTube в группу НЕ входят (иначе фейловер сменил бы гео/режим)."""
+    out = []
+    for s in servers or []:
+        n = re.sub(r'[^0-9A-Za-zА-Яа-яЁё]', '', s.get('name', '')).lower()
+        if not n.startswith('goodmannet'):
+            continue
+        rest = n[len('goodmannet'):]
+        if rest in ('', 'резерв', 'reserve', 'failover', 'cdn'):
+            out.append(s)
+    return out
+
+
+def is_general_server(server, servers):
+    """Является ли выбранный сервер «общим» (входит в авто-группу)."""
+    key = lambda s: (s.get('host'), s.get('port'), s.get('path'))
+    return any(key(server) == key(g) for g in general_servers(servers))
 
 
 def _parse_userinfo(v):
@@ -129,10 +149,12 @@ def config_socks_test(s, port=10999):
 BYPASS_SUFFIXES = ['.ru', '.su', '.xn--p1ai']   # .xn--p1ai = .рф
 
 
-def config_tun(s, bypass_ru=True):
+def config_tun(s, bypass_ru=True, failover=None):
     """Полный VPN-конфиг: tun (auto_route) -> vless. Запускается сервисом от root.
     Адрес сервера пиннится по IP на момент подключения (DNS дальше идёт через туннель).
-    bypass_ru: сайты .ru/.рф идут напрямую (банки/госуслуги работают без танцев)."""
+    bypass_ru: сайты .ru/.рф идут напрямую (банки/госуслуги работают без танцев).
+    failover: список серверов для авто-переключения. Если задан и в нём >1 сервера —
+    outbound 'proxy' становится группой urltest: sing-box сам гоняет трафик на живой сервер."""
     ip = resolve_ip(s['host'])
     dns_servers = [{'type': 'https', 'tag': 'proxydns', 'server': '1.1.1.1', 'detour': 'proxy'}]
     dns_rules = []
@@ -150,6 +172,20 @@ def config_tun(s, bypass_ru=True):
     if bypass_ru:
         dns_rules.append({'domain_suffix': BYPASS_SUFFIXES, 'server': 'localdns'})
         route_rules.append({'domain_suffix': BYPASS_SUFFIXES, 'outbound': 'direct'})
+    # outbound 'proxy': либо один сервер, либо urltest-группа (авто-переключение)
+    _group = [x for x in (failover or []) if x and x.get('host')]
+    if len(_group) > 1:
+        members, member_outs = [], []
+        for _i, _fs in enumerate(_group):
+            _tag = 'srv%d' % _i
+            member_outs.append(make_outbound(_fs, _tag, server=(resolve_ip(_fs['host']) or _fs['host'])))
+            members.append(_tag)
+        proxy_ob = {'type': 'urltest', 'tag': 'proxy', 'outbounds': members,
+                    'url': 'https://www.gstatic.com/generate_204',
+                    'interval': '1m0s', 'tolerance': 100, 'idle_timeout': '10m0s'}
+        outbounds = [proxy_ob] + member_outs + [{'type': 'direct', 'tag': 'direct'}]
+    else:
+        outbounds = [make_outbound(s, 'proxy', server=ip), {'type': 'direct', 'tag': 'direct'}]
     cfg = {
         'log': {'level': 'warn', 'timestamp': True},
         'dns': {'servers': dns_servers, 'final': 'proxydns', 'strategy': 'ipv4_only'},
@@ -159,10 +195,7 @@ def config_tun(s, bypass_ru=True):
             'strict_route': True, 'stack': 'gvisor',
             'iproute2_table_index': ROUTE_TABLE, 'iproute2_rule_index': ROUTE_RULE,
         }],
-        'outbounds': [
-            make_outbound(s, 'proxy', server=ip),
-            {'type': 'direct', 'tag': 'direct'},
-        ],
+        'outbounds': outbounds,
         'route': {
             'rules': route_rules,
             'final': 'proxy', 'auto_detect_interface': True,

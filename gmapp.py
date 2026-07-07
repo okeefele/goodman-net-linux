@@ -69,8 +69,65 @@ elif IS_MAC and getattr(sys, 'frozen', False):
 
 import uuid as _uuid
 
+# Версия десктоп-клиента. Бампается при каждой публикации нового бандла (linux tar / windows exe).
+# Проверяется раз в сутки против манифеста ниже; если на сервере версия выше — показываем баннер.
+APP_VERSION = '1.1.0'
+UPDATE_MANIFEST = 'https://gdman.ink/dl/releases/desktop.json'
+
 FLAGS = {'GB': '🇬🇧', 'DE': '🇩🇪', 'PL': '🇵🇱', 'IT': '🇮🇹', 'CA': '🇨🇦', 'US': '🇺🇸',
          'JP': '🇯🇵', 'KZ': '🇰🇿', 'TR': '🇹🇷', 'NL': '🇳🇱', 'IR': '🇮🇷', 'RU': '🇷🇺'}
+
+
+def _ver_tuple(v):
+    """'1.10.2' -> (1,10,2); нечисловые части → 0, чтобы сравнение не падало."""
+    out = []
+    for p in str(v or '0').strip().split('.'):
+        try:
+            out.append(int(''.join(ch for ch in p if ch.isdigit()) or 0))
+        except Exception:
+            out.append(0)
+    return tuple(out) or (0,)
+
+
+def check_app_update(force=False):
+    """Тихо (раз в сутки) спрашивает манифест. Возвращает dict {latest,notes,url,page}, если на
+    сервере версия НОВЕЕ текущей, иначе None. Результат кэшируется в settings['upd_available'],
+    чтобы баннер держался между опросами (web-UI поллит /api/state часто). Троттлинг — 24 ч."""
+    import time
+    st = load_settings()
+    cached = st.get('upd_available') or None
+    # если юзер уже обновился (APP_VERSION дорос) — сбрасываем устаревший кэш
+    if cached and _ver_tuple(str(cached.get('latest', '0'))) <= _ver_tuple(APP_VERSION):
+        cached = None
+        st.pop('upd_available', None)
+        try: save_settings(st)
+        except Exception: pass
+    if not force:
+        last = float(st.get('upd_last_check', 0) or 0)
+        if time.time() - last < 24 * 3600:
+            return cached
+    try:
+        req = urllib.request.Request(UPDATE_MANIFEST, headers={'User-Agent': 'GoodManNet/%s' % APP_VERSION})
+        data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
+    except Exception as e:
+        print('update check err:', e)
+        return cached
+    st['upd_last_check'] = time.time()
+    latest = str(data.get('version', '')).strip()
+    info = None
+    if latest and _ver_tuple(latest) > _ver_tuple(APP_VERSION):
+        url = data.get('url_windows' if IS_WIN else 'url_mac' if IS_MAC else 'url_linux') \
+            or data.get('page') or 'https://gdman.ink/dl'
+        info = {'latest': latest, 'notes': data.get('notes', ''), 'url': url,
+                'page': data.get('page', 'https://gdman.ink/dl')}
+        st['upd_available'] = info
+    else:
+        st.pop('upd_available', None)
+    try:
+        save_settings(st)
+    except Exception:
+        pass
+    return info
 
 # ---------------- локализация ----------------
 L10N = {
@@ -89,6 +146,13 @@ L10N = {
         'tg': '✈ Telegram',
         'menu_kill': '🛡 Kill Switch (блокировать интернет без VPN)',
         'menu_bypass': '🏦 Сайты .ru/.рф — мимо VPN',
+        'menu_autoswitch': '🔄 Автопереключение сервера  ⓘ',
+        'autoswitch_on': 'ВКЛючено. Если текущий сервер перестанет отвечать, приложение само переключится '
+                         'на резервный рабочий (основной ↔ резерв) — интернет не оборвётся, cert-ошибок не будет. '
+                         'Страна/гео при этом НЕ меняются (работает только для основного сервера, не для стран).',
+        'autoswitch_off': 'ВЫКЛючено. Используется только выбранный сервер. Если он перестанет отвечать — '
+                          'интернет пропадёт (страницы не грузятся, возможны cert-ошибки), пока вручную не '
+                          'переключишь сервер. Включи, чтобы приложение делало это само.',
         'menu_theme': '🌓 Светлая тема', 'menu_lang': '🌐 English',
         'logout_q': 'Выйти из подписки?',
         'logout_msg': 'VPN будет отключён, подписка удалена из приложения. '
@@ -124,6 +188,13 @@ L10N = {
         'tg': '✈ Telegram',
         'menu_kill': '🛡 Kill Switch (block internet without VPN)',
         'menu_bypass': '🏦 .ru/.рф sites — bypass VPN',
+        'menu_autoswitch': '🔄 Auto-switch server  ⓘ',
+        'autoswitch_on': 'ON. If the current server stops responding, the app switches to a working backup '
+                         '(main ↔ reserve) automatically — no internet drop, no cert errors. Your country/geo '
+                         'does NOT change (applies to the main server only, not country servers).',
+        'autoswitch_off': 'OFF. Only the selected server is used. If it stops responding, the internet goes '
+                          'down (pages won\'t load, possible cert errors) until you switch servers manually. '
+                          'Turn on to let the app do it for you.',
         'menu_theme': '🌓 Light theme', 'menu_lang': '🌐 Русский',
         'logout_q': 'Log out of subscription?',
         'logout_msg': 'VPN will be disconnected and the subscription removed from the app. '
@@ -412,7 +483,16 @@ WIN_LOG = os.path.join(os.path.dirname(SYS_CONFIG), 'singbox.log') if IS_WIN els
 
 def write_sys_config(server):
     st = load_settings()
-    cfg = gmcore.config_tun(server, bypass_ru=st.get('bypass_ru', True))
+    # авто-переключение: группа urltest только если фича вкл И выбран «общий» сервер
+    # (страну/Plus не подменяем — иначе фейловер сменил бы гео/режим)
+    fo = None
+    if st.get('auto_failover'):
+        _srv = st.get('servers', [])
+        if gmcore.is_general_server(server, _srv):
+            _grp = gmcore.general_servers(_srv)
+            if len(_grp) > 1:
+                fo = _grp
+    cfg = gmcore.config_tun(server, bypass_ru=st.get('bypass_ru', True), failover=fo)
     if IS_WIN:
         cfg['log']['output'] = WIN_LOG   # служба Windows не отдаёт stdout → пишем лог в файл
         tun = cfg['inbounds'][0]          # iproute2_* — только Linux; на Windows убираем
@@ -545,6 +625,9 @@ window { background: #1C1B1F; }
 .top { color: #f97910; background: rgba(249,121,16,.10); border: 1px solid rgba(249,121,16,.35);
   border-radius: 10px; padding: 7px 14px; font-size: 13px; font-weight: 600; outline: none; }
 .top:hover { background: rgba(249,121,16,.18); }
+.updbanner { color: #4aa3ff; background: rgba(10,132,255,.10); border: 1px solid rgba(10,132,255,.35);
+  border-radius: 20px; padding: 6px 16px; font-size: 12px; font-weight: 600; outline: none; }
+.updbanner:hover { background: rgba(10,132,255,.20); }
 .qa { color: #f97910; background: transparent; border: none; font-size: 13px; font-weight: 600;
   padding: 6px 10px; outline: none; }
 .qa:hover { background: rgba(249,121,16,.12); border-radius: 8px; }
@@ -588,6 +671,9 @@ window { background: #FFFFFF; }
 .top { color: #7C3AED; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.30);
   border-radius: 10px; padding: 7px 14px; font-size: 13px; font-weight: 600; outline: none; }
 .top:hover { background: rgba(124,58,237,.16); }
+.updbanner { color: #0A84FF; background: rgba(10,132,255,.08); border: 1px solid rgba(10,132,255,.30);
+  border-radius: 20px; padding: 6px 16px; font-size: 12px; font-weight: 600; outline: none; }
+.updbanner:hover { background: rgba(10,132,255,.16); }
 .qa { color: #7C3AED; background: transparent; border: none; font-size: 13px; font-weight: 600;
   padding: 6px 10px; outline: none; }
 .qa:hover { background: rgba(124,58,237,.10); border-radius: 8px; }
@@ -662,6 +748,19 @@ def run_gtk():
             toprow.pack_start(self.lktop, True, True, 0)
             toprow.pack_start(tgtop, True, True, 0)
             root.pack_start(toprow, False, False, 0)
+
+            # Ненавязчивый баннер обновления — между «ЛК/Telegram» и кнопкой подключения.
+            # Скрыт по умолчанию; показывается, если фоновая проверка нашла новую версию.
+            self.updbtn = Gtk.Button(label='')
+            self.updbtn.set_can_focus(False)
+            self.updbtn.set_no_show_all(True)      # не всплывает при show_all(), пока сами не покажем
+            self.updbtn.get_style_context().add_class('updbanner')
+            self.updbtn.set_halign(Gtk.Align.CENTER)
+            self.updbtn.set_margin_top(6)
+            self.updbtn.connect('clicked', lambda *_: self.on_update_click())
+            root.pack_start(self.updbtn, False, False, 0)
+            self._upd_info = None
+            GLib.timeout_add_seconds(3, self._check_update_bg)   # тихая проверка вскоре после старта
 
             # ⚙  [POWER]  📋 — меню и логи по бокам от кнопки включения
             prow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
@@ -810,6 +909,7 @@ def run_gtk():
                 (None, None, None),
                 ('menu_kill', self.on_kill_toggle, bool(st.get('killswitch'))),
                 ('menu_bypass', self.on_bypass_toggle, st.get('bypass_ru', True)),
+                ('menu_autoswitch', self.on_autoswitch_toggle, bool(st.get('auto_failover'))),
                 (None, None, None),
                 ('menu_theme', self.on_theme_toggle, st.get('theme', 'dark') == 'light'),
                 ('menu_lang', self.on_lang_toggle, None),
@@ -827,6 +927,9 @@ def run_gtk():
                     mi = Gtk.CheckMenuItem(label=tr(key))
                     mi.set_active(checked)
                     mi.connect('toggled', cb)
+                    if key == 'menu_autoswitch':
+                        mi.set_has_tooltip(True)
+                        mi.set_tooltip_text(tr('autoswitch_on') if checked else tr('autoswitch_off'))
                 self.menu.append(mi)
             self.menu.show_all()
 
@@ -856,6 +959,15 @@ def run_gtk():
             st = load_settings()
             st['bypass_ru'] = mi.get_active()
             save_settings(st)
+            if is_connected():
+                write_sys_config(st['servers'][st.get('selected', 0)])
+                svc('restart')
+
+        def on_autoswitch_toggle(self, mi):
+            st = load_settings()
+            st['auto_failover'] = mi.get_active()
+            save_settings(st)
+            self.build_menu()   # обновить подсказку под новое состояние
             if is_connected():
                 write_sys_config(st['servers'][st.get('selected', 0)])
                 svc('restart')
@@ -929,6 +1041,83 @@ def run_gtk():
 
         def open_lk(self):
             self.open_url(load_settings().get('lk') or 'https://gdman.ink')
+
+        # ---------- обновление приложения ----------
+        def _check_update_bg(self):
+            """Фоновая тихая проверка версии (раз в сутки). Показывает баннер, если есть новее."""
+            def worker():
+                info = check_app_update()
+                if info:
+                    GLib.idle_add(self._show_upd_banner, info)
+            threading.Thread(target=worker, daemon=True).start()
+            return False   # одноразовый timeout
+
+        def _show_upd_banner(self, info):
+            self._upd_info = info
+            self.updbtn.set_label('🔔 Есть обновление %s — нажмите, чтобы обновить' % info.get('latest', ''))
+            self.updbtn.show()
+            return False
+
+        def on_update_click(self):
+            info = self._upd_info or {}
+            dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                    message_type=Gtk.MessageType.INFO,
+                                    buttons=Gtk.ButtonsType.NONE,
+                                    text='Обновление GoodMan Net %s' % info.get('latest', ''))
+            notes = (info.get('notes') or '').strip()
+            dlg.format_secondary_text((notes + '\n\n' if notes else '') +
+                                      ('Текущая версия: %s.\nОбновить сейчас?' % APP_VERSION))
+            dlg.add_button('Позже', Gtk.ResponseType.CANCEL)
+            dlg.add_button('Обновить', Gtk.ResponseType.OK)
+            resp = dlg.run(); dlg.destroy()
+            if resp == Gtk.ResponseType.OK:
+                self.do_update(info)
+
+        def do_update(self, info):
+            # Linux: переустановка официальным установщиком через pkexec (нужен root для /opt + сервис).
+            # Windows/Mac: открываем страницу загрузки (замена работающего exe/.app вживую ненадёжна).
+            if IS_WIN or IS_MAC:
+                self.open_url(info.get('page') or 'https://gdman.ink/dl')
+                return
+            if not any(os.access(os.path.join(p, 'pkexec'), os.X_OK)
+                       for p in os.environ.get('PATH', '/usr/bin').split(':') if p):
+                self.open_url(info.get('page') or 'https://gdman.ink/dl')
+                return
+            self.updbtn.set_label('⏳ Обновляю…'); self.updbtn.set_sensitive(False)
+
+            def worker():
+                ok = False; err = ''
+                try:
+                    r = subprocess.run(['pkexec', 'bash', '-c',
+                                        'wget -qO- https://gdman.ink/dl/install.sh | bash'],
+                                       capture_output=True, text=True, timeout=180)
+                    ok = (r.returncode == 0)
+                    err = (r.stderr or r.stdout or '').strip()[-400:]
+                except Exception as e:
+                    err = str(e)
+                GLib.idle_add(self._update_done, ok, err)
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _update_done(self, ok, err):
+            self.updbtn.set_sensitive(True)
+            if ok:
+                self.updbtn.hide()
+                d = Gtk.MessageDialog(transient_for=self, modal=True,
+                                      message_type=Gtk.MessageType.INFO,
+                                      buttons=Gtk.ButtonsType.OK,
+                                      text='Готово — обновление установлено')
+                d.format_secondary_text('Перезапустите приложение, чтобы применить новую версию.')
+                d.run(); d.destroy()
+            else:
+                self.updbtn.set_label('🔔 Есть обновление — нажмите, чтобы обновить')
+                d = Gtk.MessageDialog(transient_for=self, modal=True,
+                                      message_type=Gtk.MessageType.WARNING,
+                                      buttons=Gtk.ButtonsType.OK,
+                                      text='Не удалось обновить автоматически')
+                d.format_secondary_text((err or 'Отменено.') +
+                                        '\n\nМожно скачать вручную: gdman.ink/dl')
+                d.run(); d.destroy()
+            return False
 
         def qa_bypass(self):
             st = load_settings()
@@ -1261,6 +1450,9 @@ def run_web():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     PORT = 8765
 
+    # тихая фоновая проверка обновления (раз в сутки) — результат ляжет в settings['upd_available']
+    threading.Thread(target=lambda: check_app_update(), daemon=True).start()
+
     def jerr(msg, details=''):
         return json.dumps({'error': msg, 'details': details}, ensure_ascii=False)
 
@@ -1291,7 +1483,8 @@ def run_web():
                 out = {'connected': conn, 'sub_set': bool(st.get('servers')),
                        'servers': [s['name'] for s in st.get('servers', [])],
                        'selected': st.get('selected', 0),
-                       'account': st.get('account', ''), 'lk': st.get('lk', '')}
+                       'account': st.get('account', ''), 'lk': st.get('lk', ''),
+                       'update': st.get('upd_available') or None}
                 if conn:
                     g = exit_geo()
                     out['exit_ok'] = g.get('ok'); out['exit_ip'] = g.get('ip')
@@ -1327,6 +1520,14 @@ def run_web():
                     return self._send(200, '{"ok":true}' if ok else jerr(t, d))
                 if self.path == '/api/disconnect':
                     do_disconnect()
+                    return self._send(200, '{"ok":true}')
+                if self.path == '/api/doupdate':
+                    info = load_settings().get('upd_available') or {}
+                    page = info.get('url') or info.get('page') or 'https://gdman.ink/dl'
+                    try:
+                        webbrowser.open(page)
+                    except Exception:
+                        pass
                     return self._send(200, '{"ok":true}')
             except Exception as e:
                 return self._send(200, jerr('Внутренняя ошибка приложения', repr(e)))
@@ -1458,6 +1659,26 @@ def run_tk():
     tg_btn = mk_top('✈  Telegram', lambda: open_url('https://t.me/goodmanNet_bot'))
     lk_btn.grid(row=0, column=0, padx=5, sticky='ew'); tg_btn.grid(row=0, column=1, padx=5, sticky='ew')
     top.columnconfigure(0, weight=1, uniform='t'); top.columnconfigure(1, weight=1, uniform='t')
+
+    # ----- ненавязчивый баннер обновления (между ЛК/Telegram и кнопкой питания) -----
+    upd_lbl = tk.Label(root, text='', bg='#12233a', fg='#4aa3ff', font=(F, 10, 'bold'),
+                       padx=14, pady=6, cursor='hand2')
+    upd_state = {'info': None}
+    def show_upd_banner(info):
+        upd_state['info'] = info
+        upd_lbl.config(text='🔔 Есть обновление %s — нажмите, чтобы обновить' % info.get('latest', ''))
+        upd_lbl.pack(after=top, pady=(2, 0))
+    upd_lbl.bind('<Button-1>', lambda e: open_url(
+        (upd_state['info'] or {}).get('page') or (upd_state['info'] or {}).get('url') or 'https://gdman.ink/dl'))
+    upd_lbl.bind('<Enter>', lambda e: upd_lbl.config(bg='#1a3252'))
+    upd_lbl.bind('<Leave>', lambda e: upd_lbl.config(bg='#12233a'))
+    def _upd_check():
+        def w():
+            info = check_app_update()
+            if info:
+                ui(lambda: show_upd_banner(info))
+        threading.Thread(target=w, daemon=True).start()
+    root.after(3000, _upd_check)
 
     # ----- круглая кнопка питания + ⚙ / 📋 по бокам (как в Linux) -----
     prow = tk.Frame(root, bg=BG); prow.pack(pady=(14, 4))
@@ -1829,6 +2050,22 @@ def run_tk():
         m.add_command(label='🔗 Сменить подписку', command=change_sub)
         m.add_command(label='🚪 Выйти из подписки', command=logout_sub)
         m.add_command(label='📋 Логи VPN', command=show_logs)
+        m.add_separator()
+        _af = tk.BooleanVar(value=bool(load_settings().get('auto_failover')))
+        def _toggle_af():
+            s2 = load_settings(); s2['auto_failover'] = _af.get(); save_settings(s2)
+            if is_connected() and s2.get('servers'):
+                write_sys_config(s2['servers'][s2.get('selected', 0)]); svc('restart')
+        m.add_checkbutton(label='🔄 Автопереключение сервера', variable=_af, command=_toggle_af)
+        def _af_info():
+            try:
+                from tkinter import messagebox
+                on = load_settings().get('auto_failover')
+                messagebox.showinfo(tr('menu_autoswitch').strip(' ⓘ'),
+                                    tr('autoswitch_on') if on else tr('autoswitch_off'))
+            except Exception:
+                pass
+        m.add_command(label='       ⓘ Что это?', command=_af_info)
         try: m.tk_popup(root.winfo_pointerx(), root.winfo_pointery())
         finally: m.grab_release()
 

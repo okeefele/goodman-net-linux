@@ -16,6 +16,10 @@
   .icon-btn:hover { background:rgba(255,255,255,.1); }
   .logo { width:74px; height:74px; border-radius:20px; margin-top:6px; }
   h1 { font-size:19px; font-weight:700; margin:10px 0 2px; letter-spacing:.3px; }
+  .updbanner { margin:10px 0 0; padding:7px 16px; border-radius:20px; cursor:pointer; font-size:12.5px;
+    font-weight:600; color:#4aa3ff; background:rgba(10,132,255,.10); border:1px solid rgba(10,132,255,.35);
+    transition:background .2s; }
+  .updbanner:hover { background:rgba(10,132,255,.20); }
   .power { margin:34px 0 18px; width:190px; height:190px; border-radius:50%; border:none; cursor:pointer;
     background:radial-gradient(circle at 50% 40%, #33405e, #1a2440); color:#dbe6ff; position:relative;
     box-shadow:0 0 0 8px rgba(255,255,255,.03), 0 14px 40px rgba(0,0,0,.5); transition:all .25s; }
@@ -73,6 +77,8 @@
 
   <img class="logo" src="/logo.png" alt="">
   <h1>GoodMan Net</h1>
+
+  <div id="updbanner" class="updbanner hidden" onclick="doUpdate()"></div>
 
   <button id="power" class="power" onclick="toggle()" title="Подключить">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
@@ -148,7 +154,14 @@ async function refresh(){
   const st = await api('/api/state');
   S.connected = st.connected; S.sub_set = st.sub_set;
   S.servers = st.servers||[]; S.selected = st.selected||0;
+  if (st.update !== undefined) S.update = st.update;
   render(st);
+}
+
+async function doUpdate(){
+  const b = document.getElementById('updbanner');
+  b.textContent = '⏳ Открываю страницу загрузки…';
+  try { await api('/api/doupdate', {}); } catch(e){}
 }
 
 function render(st){
@@ -160,6 +173,12 @@ function render(st){
     status.textContent = (st.flag||'✅') + ' Подключено' + (st.exit_ip ? ' · ' + st.exit_ip : '');
     status.className='status on';
   } else { status.textContent='Отключено'; status.className='status off'; }
+
+  const ub = document.getElementById('updbanner');
+  if (S.update && S.update.latest){
+    ub.textContent = '🔔 Есть обновление ' + S.update.latest + ' — нажмите, чтобы обновить';
+    ub.classList.remove('hidden');
+  } else { ub.classList.add('hidden'); }
 
   document.getElementById('setup').classList.toggle('hidden', S.sub_set);
   document.getElementById('hint').textContent = S.sub_set ? '' : 'Добавьте подписку, чтобы начать';
